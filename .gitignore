@@ -1,0 +1,23 @@
+# C++ build artifacts
+cpp/dpi_engine
+cpp/dpi_simple
+cpp/dpi_engine.exe
+cpp/*.o
+cpp/build/
+
+# Java build artifacts
+java/target/
+java/dependency-reduced-pom.xml
+
+# PCAP output files
+*.pcap
+!test_dpi.pcap
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.iml
