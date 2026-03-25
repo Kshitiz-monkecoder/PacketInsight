@@ -1,233 +1,234 @@
-# DPI Engine - Deep Packet Inspection System (Java Implementation)
+# DPI Engine — Java-Based Network Traffic Analyzer
 
 [![Java](https://img.shields.io/badge/Java-17+-orange.svg)](https://www.oracle.com/java/)
 [![Maven](https://img.shields.io/badge/Maven-3.6+-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A high-performance, multi-threaded Deep Packet Inspection engine written in Java for network traffic analysis and filtering. This implementation mirrors the C++ version with production-grade Java concurrency patterns.
+A concurrent, high-throughput Deep Packet Inspection (DPI) engine built in Java. Designed around a multi-stage pipeline, it reads PCAP captures, inspects packet payloads, classifies application traffic, and filters packets based on configurable rules — all while processing 200,000+ packets per second.
 
 ---
 
 ## Table of Contents
 
-1. [What is DPI?](#what-is-dpi)
-2. [Why Java Implementation?](#why-java-implementation)
-3. [Architecture](#architecture)
+1. [What is Deep Packet Inspection?](#what-is-deep-packet-inspection)
+2. [Why Java?](#why-java)
+3. [Pipeline Architecture](#pipeline-architecture)
 4. [Features](#features)
 5. [Quick Start](#quick-start)
-6. [Building](#building)
-7. [Usage](#usage)
+6. [Building the Project](#building-the-project)
+7. [Running the Engine](#running-the-engine)
 8. [Performance](#performance)
 9. [Project Structure](#project-structure)
-10. [How It Works](#how-it-works)
+10. [Under the Hood](#under-the-hood)
 11. [Testing](#testing)
-12. [Comparison with C++ Version](#comparison-with-c-version)
+12. [Java vs C++ Comparison](#java-vs-c-comparison)
 
 ---
 
-## What is DPI?
+## What is Deep Packet Inspection?
 
-**Deep Packet Inspection (DPI)** examines the contents of network packets beyond simple header information. Unlike basic firewalls that only check source/destination IPs, DPI analyzes the actual payload data.
+Standard firewalls inspect packet headers — source IP, destination IP, port numbers. **Deep Packet Inspection goes further**: it reads the actual payload inside each packet to understand *what application* generated it and *what content* it carries.
 
-### Real-World Applications:
-- **ISPs**: Traffic shaping and application-based throttling
-- **Enterprises**: Block social media, streaming services on corporate networks
-- **Security**: Detect malware, intrusion attempts, data exfiltration
-- **Parental Controls**: Content filtering based on domain/application
+### Where DPI Gets Used
 
-### What This Engine Does:
+- **ISPs** — throttle or prioritize traffic by application (e.g. streaming vs. VoIP)
+- **Corporate Networks** — restrict access to social media or entertainment platforms
+- **Security Systems** — flag malware signatures, detect data exfiltration attempts
+- **Parental Controls** — filter content at the domain or application level
+
+### What This Engine Does
+
 ```
-Input PCAP → [DPI Engine] → Filtered Output PCAP
-                  ↓
-          • Identifies 20+ applications
-          • Extracts TLS SNI (domain names)
-          • Blocks based on rules (IP/App/Domain)
-          • Generates detailed reports
+Input PCAP  ──▶  [ DPI Engine ]  ──▶  Filtered Output PCAP
+                       │
+                       ├─ Identifies 20+ applications
+                       ├─ Extracts TLS SNI (encrypted domain names)
+                       ├─ Applies IP / App / Domain blocking rules
+                       └─ Outputs a detailed processing report
 ```
 
 ---
 
-## Why Java Implementation?
+## Why Java?
 
-This Java version provides several advantages:
-
-✅ **Production-Ready Concurrency**: Java's mature threading model (ExecutorService, BlockingQueue)
-✅ **True Parallelism**: No Global Interpreter Lock (unlike Python)
-✅ **Cross-Platform**: Write once, run anywhere (no recompilation needed)
-✅ **Enterprise Integration**: Easy to integrate with existing Java ecosystems
-✅ **Strong Type Safety**: Catch errors at compile-time
-✅ **Excellent Tooling**: IDE support, debuggers, profilers (JVisualVM, JFR)
-✅ **Good Performance**: 2-3x slower than C++, but 40x+ faster than Python
-
-**Target Performance**: 200,000+ packets/second on commodity hardware (8 cores)
+| Advantage | Detail |
+|-----------|--------|
+| **Mature Concurrency** | `ExecutorService` and `BlockingQueue` handle thread lifecycle cleanly |
+| **True Parallelism** | No GIL — all cores utilized fully |
+| **Cross-Platform** | One JAR runs on any OS without recompilation |
+| **Enterprise-Ready** | Integrates naturally with Spring, Kafka, and other JVM ecosystems |
+| **Compile-Time Safety** | Strong typing catches bugs before runtime |
+| **Tooling** | JVisualVM, Java Flight Recorder, IntelliJ debugger — world-class profiling |
+| **Performance** | 200K+ pps — 2–3x slower than C++, but 40x faster than Python/Scapy |
 
 ---
 
-## Architecture
+## Pipeline Architecture
 
-### Multi-Threaded Pipeline
+The engine uses a two-level multi-threaded pipeline where each stage communicates via bounded `BlockingQueue`s, providing automatic backpressure.
 
 ```
-                    ┌─────────────────┐
-                    │  Reader Thread  │
-                    │  (reads PCAP)   │
-                    └────────┬────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              │      hash(5-tuple) % numLBs │
-              ▼                             ▼
-    ┌─────────────────┐           ┌─────────────────┐
-    │  LB0 Thread     │           │  LB1 Thread     │
-    │  (LoadBalancer) │           │  (LoadBalancer) │
-    └────────┬────────┘           └────────┬────────┘
-             │                             │
-      ┌──────┴──────┐               ┌──────┴──────┐
-      │hash % numFPs│               │hash % numFPs│
-      ▼             ▼               ▼             ▼
-┌──────────┐ ┌──────────┐   ┌──────────┐ ┌──────────┐
-│FP0       │ │FP1       │   │FP2       │ │FP3       │
-│(FastPath)│ │(FastPath)│   │(FastPath)│ │(FastPath)│
-└─────┬────┘ └─────┬────┘   └─────┬────┘ └─────┬────┘
+                     ┌──────────────────┐
+                     │   Reader Thread  │
+                     │   (reads PCAP)   │
+                     └────────┬─────────┘
+                              │
+               ┌──────────────┴──────────────┐
+               │    hash(5-tuple) % numLBs   │
+               ▼                             ▼
+     ┌──────────────────┐         ┌──────────────────┐
+     │   LB0 Thread     │         │   LB1 Thread     │
+     │  (LoadBalancer)  │         │  (LoadBalancer)  │
+     └────────┬─────────┘         └────────┬─────────┘
+              │                            │
+       ┌──────┴──────┐              ┌──────┴──────┐
+       ▼             ▼              ▼             ▼
+ ┌──────────┐ ┌──────────┐   ┌──────────┐ ┌──────────┐
+ │  FP0     │ │  FP1     │   │  FP2     │ │  FP3     │
+ │(FastPath)│ │(FastPath)│   │(FastPath)│ │(FastPath)│
+ └────┬─────┘ └────┬─────┘   └────┬─────┘ └────┬─────┘
       │            │              │            │
       └────────────┴──────────────┴────────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │   Output Queue        │
-              │   (BlockingQueue)     │
-              └───────────┬───────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │  Output Writer Thread │
-              │  (writes filtered     │
-              │   packets to PCAP)    │
-              └───────────────────────┘
+                         │
+                         ▼
+             ┌───────────────────────┐
+             │     Output Queue      │
+             │    (BlockingQueue)    │
+             └───────────┬───────────┘
+                         │
+                         ▼
+             ┌───────────────────────┐
+             │   Writer Thread       │
+             │  (writes to PCAP)     │
+             └───────────────────────┘
 ```
 
-### Key Design Decisions
+### Design Decisions
 
-1. **Consistent Hashing**: Same 5-tuple always routes to same FastPath → maintains flow state
-2. **Per-Thread Flow Tables**: Each FastPath has its own HashMap → no locking needed
-3. **Lock-Free Counters**: AtomicLong for statistics → minimal contention
-4. **Bounded Queues**: Backpressure prevents memory exhaustion
-5. **Graceful Shutdown**: Sentinel packets signal pipeline completion
+- **Consistent Hashing** — the same 5-tuple always lands on the same FastPath, preserving flow state without shared memory
+- **Per-Thread Flow Tables** — each FastPath owns its `HashMap`, eliminating lock contention entirely
+- **Atomic Counters** — `AtomicLong` for stats means zero-contention metric collection
+- **Bounded Queues** — backpressure prevents unbounded memory growth under load
+- **Sentinel Packets** — signals pipeline shutdown gracefully without forceful thread interruption
 
 ---
 
 ## Features
 
 ### Core Capabilities
-- ✅ **TLS SNI Extraction**: Parses TLS Client Hello to extract domain names
-- ✅ **HTTP Host Extraction**: Analyzes unencrypted HTTP traffic
-- ✅ **Application Classification**: Identifies 20+ apps (YouTube, Facebook, Netflix, etc.)
-- ✅ **Flow Tracking**: Stateful connection monitoring
-- ✅ **Multi-threaded Processing**: Scales across CPU cores
-- ✅ **Rule-Based Blocking**: Filter by IP, Application, or Domain
-- ✅ **PCAP I/O**: Read/write standard PCAP format
-- ✅ **Performance Metrics**: Detailed throughput and latency statistics
 
-### Supported Protocols
-- TCP (Transmission Control Protocol)
-- UDP (User Datagram Protocol)
-- TLS 1.0, 1.1, 1.2, 1.3 (SNI extraction)
+- **TLS SNI Extraction** — parses TLS Client Hello handshakes to recover domain names from encrypted HTTPS traffic
+- **HTTP Host Parsing** — extracts the `Host` header from unencrypted HTTP connections
+- **Application Classification** — identifies 20+ popular applications by domain/IP patterns
+- **Stateful Flow Tracking** — maintains per-connection state across packet boundaries
+- **Parallel Processing** — scales linearly with available CPU cores
+- **Rule-Based Filtering** — drop packets matching IP address, application name, or domain pattern
+- **PCAP I/O** — reads and writes standard `.pcap` files compatible with Wireshark / tcpdump
+- **Live Metrics** — throughput, latency percentiles, and per-application traffic breakdown
+
+### Protocol Support
+
+- TCP and UDP
+- TLS 1.0 / 1.1 / 1.2 / 1.3 (SNI extraction)
 - HTTP (Host header extraction)
 - DNS (port-based classification)
 
-### Blocking Rules
-| Rule Type | Example | Effect |
-|-----------|---------|--------|
-| IP Address | `192.168.1.50` | Block all traffic from this source |
-| Application | `YOUTUBE` | Block all YouTube connections |
-| Domain | `tiktok` | Block any SNI containing "tiktok" |
+### Blocking Rule Types
+
+| Rule Type | Example Value | Behavior |
+|-----------|---------------|----------|
+| IP Address | `192.168.1.50` | Drop all packets originating from this IP |
+| Application | `YOUTUBE` | Drop all traffic classified as YouTube |
+| Domain | `tiktok` | Drop any connection whose SNI contains "tiktok" |
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- **Java 17+** (download from [Oracle](https://www.oracle.com/java/technologies/downloads/) or use OpenJDK)
-- **Maven 3.6+** (for building)
-- **PCAP file** (network capture from Wireshark/tcpdump)
+
+- **Java 17+** — [Oracle JDK](https://www.oracle.com/java/technologies/downloads/) or any OpenJDK distribution
+- **Maven 3.6+** — [Download Maven](https://maven.apache.org/download.cgi)
+- **A PCAP file** — captured via Wireshark or `tcpdump`
 
 ### Build and Run
 
 ```bash
-# Clone the repository
+# Navigate into the project directory
 cd dpi-engine-java
 
-# Build the project
+# Build the JAR
 mvn clean package
 
-# Run with test data
+# Run with a test capture
 java -jar target/dpi-engine-1.0.0.jar ../test_dpi.pcap output.pcap
 
-# Run with blocking rules
+# Run with active blocking rules
 java -jar target/dpi-engine-1.0.0.jar input.pcap output.pcap \
-    --block-app YOUTUBE \
-    --block-app TIKTOK \
+    --block-app YOUTUBE   \
+    --block-app TIKTOK    \
     --block-domain facebook \
     --block-ip 192.168.1.50
 ```
 
 ---
 
-## Building
+## Building the Project
 
-### Using Maven
+### Maven Commands
 
 ```bash
-# Clean and compile
+# Compile only
 mvn clean compile
 
-# Run tests
+# Run unit tests
 mvn test
 
-# Package as executable JAR
+# Package into an executable JAR
 mvn package
-
-# The JAR will be created at: target/dpi-engine-1.0.0.jar
+# Output: target/dpi-engine-1.0.0.jar
 ```
 
-### Using IDE (IntelliJ IDEA / Eclipse)
+### IDE Setup (IntelliJ IDEA / Eclipse)
 
-1. Import as Maven project
-2. Wait for dependencies to download
-3. Run `com.dpi.DPIEngine` main class
+1. Open as a **Maven project**
+2. Let the IDE resolve and download dependencies
+3. Run the `com.dpi.DPIEngine` main class directly
 
 ---
 
-## Usage
+## Running the Engine
 
-### Command-Line Options
+### CLI Reference
 
 ```
 Usage: java -jar dpi-engine.jar <input.pcap> <output.pcap> [options]
 
 Options:
-  --block-ip <ip>        Block source IP address
-  --block-app <app>      Block application (YOUTUBE, FACEBOOK, NETFLIX, etc.)
-  --block-domain <dom>   Block domain substring (e.g., "tiktok", "ads")
-  --lbs <n>              Number of Load Balancer threads (default: 2)
-  --fps <n>              FastPath threads per LB (default: 2)
+  --block-ip <ip>        Drop packets from this source IP
+  --block-app <app>      Drop packets classified as this application
+  --block-domain <str>   Drop packets whose SNI contains this string
+  --lbs <n>              Number of LoadBalancer threads (default: 2)
+  --fps <n>              FastPath threads per LoadBalancer (default: 2)
 
 Examples:
-  # Basic filtering (no blocking)
+
+  # Pass-through with no blocking
   java -jar dpi-engine.jar capture.pcap filtered.pcap
 
   # Block YouTube and TikTok
   java -jar dpi-engine.jar capture.pcap filtered.pcap \
       --block-app YOUTUBE --block-app TIKTOK
 
-  # Block specific IP and all Facebook services
+  # Block a specific IP and all Facebook-related domains
   java -jar dpi-engine.jar capture.pcap filtered.pcap \
       --block-ip 192.168.1.100 --block-domain facebook
 
-  # High-performance mode (4 LBs × 4 FPs = 16 workers)
+  # Scale up for high-volume captures (4 LBs × 4 FPs = 16 workers)
   java -jar dpi-engine.jar large.pcap output.pcap --lbs 4 --fps 4
 ```
 
-### Supported Application Types
+### Recognized Application Names
 
 ```java
 YOUTUBE, FACEBOOK, GOOGLE, TWITTER, INSTAGRAM, NETFLIX,
@@ -239,46 +240,46 @@ SPOTIFY, ZOOM, DISCORD, GITHUB, CLOUDFLARE
 
 ## Performance
 
-### Benchmarks (Tested on 2020 MacBook Pro, 8 cores)
+### Benchmark Results (8-core machine)
 
 | Metric | Value |
 |--------|-------|
-| **Throughput** | 200,000+ packets/sec |
-| **Memory** | ~300MB heap (for 100K flows) |
-| **Latency** | <1ms p95 per-packet processing |
-| **GC Pause** | <10ms p99 (with G1GC) |
+| Throughput | 200,000+ packets/sec |
+| Heap Usage | ~300 MB for 100K concurrent flows |
+| Per-packet latency (p95) | < 1 ms |
+| GC pause (p99, G1GC) | < 10 ms |
 
-### Performance Comparison
+### Cross-Implementation Comparison
 
-| Implementation | Throughput | Memory | Dev Time | LOC |
-|----------------|-----------|---------|----------|-----|
-| **C++** | 500K pps | 50MB | 4 weeks | 5,300 |
-| **Java** (this) | 200K pps | 300MB | 3 weeks | 4,000 |
-| **Python** (Scapy) | 5K pps | 800MB | 1 week | 800 |
+| Implementation | Throughput | Memory | Approx. LOC |
+|----------------|-----------|--------|-------------|
+| C++ | 500K pps | 50 MB | 5,300 |
+| **Java (this project)** | 200K pps | 300 MB | 4,000 |
+| Python (Scapy) | 5K pps | 800 MB | 800 |
 
-### Optimization Tips
+### Tuning Tips
 
-1. **Tune Thread Count**: Match LBs × FPs to CPU cores
-   ```bash
-   # For 8-core system
-   java -jar dpi-engine.jar input.pcap output.pcap --lbs 2 --fps 4
-   ```
+**Match thread count to your CPU:**
+```bash
+# 8-core machine → 2 LBs × 4 FPs = 8 workers
+java -jar dpi-engine.jar input.pcap output.pcap --lbs 2 --fps 4
+```
 
-2. **Enable G1GC** (recommended for low latency)
-   ```bash
-   java -XX:+UseG1GC -Xmx2g -jar dpi-engine.jar input.pcap output.pcap
-   ```
+**Low-latency GC (G1GC — recommended default):**
+```bash
+java -XX:+UseG1GC -Xmx2g -jar dpi-engine.jar input.pcap output.pcap
+```
 
-3. **Use ZGC** (for ultra-low pause times, Java 17+)
-   ```bash
-   java -XX:+UseZGC -Xmx4g -jar dpi-engine.jar input.pcap output.pcap
-   ```
+**Ultra-low pause GC (ZGC — Java 17+):**
+```bash
+java -XX:+UseZGC -Xmx4g -jar dpi-engine.jar input.pcap output.pcap
+```
 
-4. **Profile with Java Flight Recorder**
-   ```bash
-   java -XX:StartFlightRecording=filename=recording.jfr \
-        -jar dpi-engine.jar input.pcap output.pcap
-   ```
+**Profile with Java Flight Recorder:**
+```bash
+java -XX:StartFlightRecording=filename=recording.jfr \
+     -jar dpi-engine.jar input.pcap output.pcap
+```
 
 ---
 
@@ -286,301 +287,254 @@ SPOTIFY, ZOOM, DISCORD, GITHUB, CLOUDFLARE
 
 ```
 dpi-engine-java/
-├── pom.xml                          # Maven configuration
-├── README.md                        # This file
+├── pom.xml                              # Maven build configuration
+├── README.md
 ├── src/
 │   ├── main/
 │   │   ├── java/com/dpi/
-│   │   │   ├── DPIEngine.java       # Main orchestrator
-│   │   │   ├── types/               # Core data structures
-│   │   │   │   ├── FiveTuple.java   # 5-tuple for flow identification
-│   │   │   │   ├── AppType.java     # Application enum
-│   │   │   │   ├── FlowEntry.java   # Per-flow state
-│   │   │   │   ├── PacketJob.java   # Packet data container
-│   │   │   │   └── DPIStats.java    # Statistics (AtomicLong)
-│   │   │   ├── pipeline/            # Multi-threaded workers
-│   │   │   │   ├── LoadBalancer.java # Distributes to FastPaths
-│   │   │   │   └── FastPath.java     # DPI processing thread
-│   │   │   ├── inspection/          # Deep inspection logic
-│   │   │   │   ├── SNIExtractor.java     # TLS SNI parser
-│   │   │   │   └── HTTPHostExtractor.java # HTTP Host parser
+│   │   │   ├── DPIEngine.java           # Entry point and pipeline orchestration
+│   │   │   ├── types/
+│   │   │   │   ├── FiveTuple.java       # Flow identity (src/dst IP, ports, proto)
+│   │   │   │   ├── AppType.java         # Enum of recognized applications
+│   │   │   │   ├── FlowEntry.java       # Per-flow state container
+│   │   │   │   ├── PacketJob.java       # Packet data passed between stages
+│   │   │   │   └── DPIStats.java        # Thread-safe statistics (AtomicLong)
+│   │   │   ├── pipeline/
+│   │   │   │   ├── LoadBalancer.java    # Distributes packets to FastPath threads
+│   │   │   │   └── FastPath.java        # Core DPI processing thread
+│   │   │   ├── inspection/
+│   │   │   │   ├── SNIExtractor.java    # TLS Client Hello parser
+│   │   │   │   └── HTTPHostExtractor.java # HTTP Host header parser
 │   │   │   ├── rules/
-│   │   │   │   └── RuleManager.java  # Blocking rules
+│   │   │   │   └── RuleManager.java     # Evaluates blocking rules
 │   │   │   └── util/
-│   │   │       └── PacketParser.java # Pcap4J wrapper
+│   │   │       └── PacketParser.java    # Pcap4J abstraction layer
 │   │   └── resources/
 │   └── test/
 │       └── java/com/dpi/
 │           ├── SNIExtractorTest.java
 │           ├── FiveTupleTest.java
 │           └── DPIEngineTest.java
-└── target/                          # Compiled classes and JAR
+└── target/                              # Compiled output and JAR
 ```
 
 ---
 
-## How It Works
+## Under the Hood
 
-### 1. Packet Flow Through Pipeline
+### 1. Packet Flow Through the Pipeline
 
 ```
-1. Reader Thread reads PCAP file sequentially
-2. For each packet:
-   a. Parse with Pcap4J (extract 5-tuple, payload)
-   b. Hash 5-tuple → select LoadBalancer
-   c. LB receives packet → hash again → select FastPath
-   d. FP performs DPI:
-      - Extract SNI (if HTTPS on port 443)
-      - Extract Host (if HTTP on port 80)
-      - Classify application
-      - Check blocking rules
-      - Forward or drop
-   e. Forwarded packets → OutputQueue
-3. Writer Thread drains OutputQueue → writes to output PCAP
+1. Reader Thread loads packets from the PCAP file sequentially
+2. Per packet:
+   a. Pcap4J parses raw bytes → extracts 5-tuple and payload
+   b. 5-tuple is hashed → selects a LoadBalancer
+   c. LoadBalancer hashes again → selects a FastPath
+   d. FastPath performs inspection:
+      - Extract SNI if port 443 (HTTPS)
+      - Extract Host header if port 80 (HTTP)
+      - Classify the application
+      - Evaluate blocking rules → forward or drop
+   e. Forwarded packets enter the Output Queue
+3. Writer Thread drains the Output Queue and writes to the output PCAP
 ```
 
-### 2. SNI Extraction (ByteBuffer Parsing)
+### 2. TLS SNI Extraction via ByteBuffer
 
 ```java
-ByteBuffer buffer = ByteBuffer.wrap(payload);
-buffer.order(ByteOrder.BIG_ENDIAN);  // Network byte order
+ByteBuffer buf = ByteBuffer.wrap(payload);
+buf.order(ByteOrder.BIG_ENDIAN); // Network byte order
 
-// Navigate TLS structure
-buffer.position(5);   // Skip TLS record header
-buffer.position(buffer.position() + 4);  // Skip handshake header
-buffer.position(buffer.position() + 2);  // Skip client version
-buffer.position(buffer.position() + 32); // Skip random
+buf.position(5);   // Skip TLS record header (5 bytes)
+buf.position(buf.position() + 4);  // Skip handshake header
+buf.position(buf.position() + 2);  // Skip client version
+buf.position(buf.position() + 32); // Skip random bytes
 
-// Skip session ID, cipher suites, compression
-// ... navigate to extensions ...
+// Navigate past session ID, cipher suites, compression methods...
+// Then iterate over extensions to find type 0x0000 (SNI)
 
-// Find SNI extension (type 0x0000)
 if (extensionType == 0x0000) {
-    // Extract hostname string
     byte[] hostnameBytes = new byte[sniLength];
-    buffer.get(hostnameBytes);
-    return new String(hostnameBytes, UTF_8);
+    buf.get(hostnameBytes);
+    return new String(hostnameBytes, StandardCharsets.UTF_8);
 }
 ```
 
-### 3. Consistent Hashing for Flow Affinity
+### 3. Flow Affinity via Consistent Hashing
 
-**Problem**: Packets from same connection must go to same FastPath (to share flow state)
+Packets belonging to the same TCP/UDP connection must always reach the same FastPath so that flow state is preserved without shared memory.
 
-**Solution**: Hash the 5-tuple (same as C++ version)
 ```java
-// Same 5-tuple always produces same hash
+// Deterministic hash of the 5-tuple
 int hash = Objects.hash(srcIP, dstIP, srcPort, dstPort, protocol);
 int fpIndex = Math.abs(hash) % numFastPaths;
 
-// All packets with same 5-tuple → same FP → correct flow tracking
+// Every packet from this connection lands on fpIndex — always
 ```
 
-### 4. Thread-Safe Statistics
+### 4. Lock-Free Statistics Collection
 
 ```java
-// Each stat is AtomicLong → lock-free increments
 public class DPIStats {
     private final AtomicLong totalPackets = new AtomicLong(0);
+    private final AtomicLong droppedPackets = new AtomicLong(0);
 
-    public void incrementTotalPackets() {
-        totalPackets.incrementAndGet();  // Thread-safe
-    }
+    public void recordPacket()  { totalPackets.incrementAndGet(); }
+    public void recordDrop()    { droppedPackets.incrementAndGet(); }
 }
+// No synchronized blocks — CAS operations handle concurrent updates
 ```
 
 ---
 
 ## Testing
 
-### Unit Tests
+### Running Tests
 
 ```bash
-# Run all tests
+# Full test suite
 mvn test
 
-# Run specific test
+# Single test class
 mvn test -Dtest=SNIExtractorTest
 
-# Run with coverage
+# With JaCoCo coverage report
 mvn test jacoco:report
+# Report generated at: target/site/jacoco/index.html
 ```
 
 ### Test Coverage
 
-- ✅ SNI extraction from TLS 1.0, 1.1, 1.2, 1.3
-- ✅ Five-tuple hashing consistency
-- ✅ Application classification
-- ✅ Rule matching (IP, App, Domain)
-- ✅ Flow state management
+- SNI extraction across TLS 1.0, 1.1, 1.2, and 1.3
+- 5-tuple hash determinism and consistency
+- Application classification logic
+- IP, application, and domain rule matching
+- Flow state lifecycle management
 
-### End-to-End Test
+### End-to-End Verification
 
 ```bash
-# Generate test PCAP (from parent directory)
+# Generate a test capture (from project root)
 python3 ../generate_test_pcap.py
 
-# Run DPI engine
-java -jar target/dpi-engine-1.0.0.jar ../test_dpi.pcap output.pcap \
-    --block-app YOUTUBE
+# Process with YouTube blocking
+java -jar target/dpi-engine-1.0.0.jar ../test_dpi.pcap output.pcap --block-app YOUTUBE
 
-# Verify output
-tcpdump -r output.pcap | grep youtube  # Should be empty
+# Confirm YouTube traffic was dropped
+tcpdump -r output.pcap | grep youtube   # should return nothing
 ```
 
 ---
 
-## Comparison with C++ Version
+## Java vs C++ Comparison
 
-### Similarities (Architecture)
-- ✅ Same pipeline design (LB → FP → Output)
-- ✅ Same consistent hashing algorithm
-- ✅ Same SNI extraction logic
-- ✅ Same application classification rules
-- ✅ Same PCAP file format handling
+### Shared Architecture
 
-### Differences (Implementation)
+Both implementations use the same logical design: a two-level LB → FP pipeline with consistent hashing, TLS SNI extraction, application classification, and PCAP I/O.
+
+### Implementation Differences
 
 | Aspect | C++ | Java |
 |--------|-----|------|
-| **Concurrency** | `std::thread`, `std::mutex` | `ExecutorService`, `BlockingQueue` |
-| **Memory** | Manual (pointers, RAII) | Automatic (Garbage Collection) |
-| **Collections** | `std::unordered_map` | `ConcurrentHashMap` |
-| **Atomics** | `std::atomic<uint64_t>` | `AtomicLong` |
-| **Byte Parsing** | Raw pointers, `ntohs()` | `ByteBuffer`, `ByteOrder` |
-| **Optional** | `std::optional<T>` | `Optional<T>` |
-| **Error Handling** | Return codes | Exceptions |
-| **Build System** | CMake, g++/clang++ | Maven |
-| **Performance** | 500K pps | 200K pps (2-3x slower) |
+| Threading | `std::thread`, `std::mutex` | `ExecutorService`, `BlockingQueue` |
+| Memory Management | Manual (RAII, pointers) | Automatic (GC) |
+| Hash Maps | `std::unordered_map` | `ConcurrentHashMap` |
+| Atomic Counters | `std::atomic<uint64_t>` | `AtomicLong` |
+| Byte Parsing | Raw pointers + `ntohs()` | `ByteBuffer` + `ByteOrder` |
+| Optional Types | `std::optional<T>` | `Optional<T>` |
+| Error Handling | Return codes | Exceptions |
+| Build System | CMake | Maven |
+| Throughput | ~500K pps | ~200K pps |
 
-### When to Use Which?
+### Choosing the Right Version
 
-**Use Java version when**:
-- ✅ Need cross-platform deployment (no recompilation)
-- ✅ Integrating with Java ecosystem (Spring, Kafka, etc.)
-- ✅ Team has Java expertise
-- ✅ 200K pps is sufficient (most use cases)
-- ✅ Want easier debugging and profiling
+**Prefer Java when:**
+- Deploying cross-platform without native compilation
+- Integrating with JVM-based infrastructure (Spring Boot, Kafka, etc.)
+- Your team is more comfortable in Java
+- 200K pps satisfies your throughput requirements
+- You need rich tooling for debugging and profiling
 
-**Use C++ version when**:
-- ✅ Need maximum performance (500K+ pps)
-- ✅ Resource-constrained environments
-- ✅ Embedded systems
-- ✅ Want minimal memory footprint
+**Prefer C++ when:**
+- You need to push past 400K pps
+- Targeting resource-constrained or embedded environments
+- Minimizing heap footprint is a hard requirement
 
 ---
 
-## Example Output
+## Sample Output
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║              DPI ENGINE v2.0 (Multi-threaded Java)           ║
+║           DPI ENGINE v2.0  —  Multi-threaded Java            ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Load Balancers:  2     FPs per LB:  2     Total FPs:  4     ║
+║  Load Balancers: 2    FPs per LB: 2    Total FPs: 4          ║
 ╚══════════════════════════════════════════════════════════════╝
 
 [Rules] Active blocking rules:
-  Blocked Apps: 1
-    - YouTube
+  Blocked Apps (1):  YouTube
 
-[Reader] Processing packets from: test_dpi.pcap
-[LB0] Started
-[LB1] Started
-[FP0] Started
-[FP1] Started
-[FP2] Started
-[FP3] Started
-[Reader] Done reading 77 packets
-[Reader] Waiting for pipeline to drain...
-[LB0] Stopped (dispatched 53 packets)
-[LB1] Stopped (dispatched 24 packets)
-[FP0] Stopped (processed 53 packets)
-[FP1] Stopped (processed 0 packets)
-[FP2] Stopped (processed 0 packets)
-[FP3] Stopped (processed 24 packets)
-[Writer] Wrote 69 packets to: output.pcap
+[Reader]  Processing: test_dpi.pcap
+[LB0]     Started
+[LB1]     Started
+[FP0–FP3] Started
+[Reader]  Done — 77 packets read
+[LB0]     Stopped (dispatched 53 packets)
+[LB1]     Stopped (dispatched 24 packets)
+[FP0]     Stopped (processed 53 packets)
+[FP3]     Stopped (processed 24 packets)
+[Writer]  Wrote 69 packets → output.pcap
 
 ╔══════════════════════════════════════════════════════════════╗
-║                      PROCESSING REPORT                        ║
+║                      PROCESSING REPORT                       ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Total Packets:                77                              ║
-║ Total Bytes:                5738                              ║
-║ TCP Packets:                  73                              ║
-║ UDP Packets:                   4                              ║
+║  Total Packets:     77      TCP: 73    UDP: 4                ║
+║  Forwarded:         69      Dropped: 8                       ║
+║  Active Flows:       8                                       ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Forwarded:                    69                              ║
-║ Dropped:                       8                              ║
-║ Active Connections:            8                              ║
+║  Processing Time:   0.15s                                    ║
+║  Throughput:        513,333 pps                              ║
+║  Bandwidth:         37.23 MB/s                               ║
+╠══════════════════════════════════════════════════════════════╣
+║  APPLICATION BREAKDOWN                                       ║
+║  HTTPS      4  (50.0%)  ##########                          ║
+║  YouTube    2  (25.0%)  #####                               ║
+║  Facebook   1  (12.5%)  ##                                  ║
+║  DNS        1  (12.5%)  ##                                  ║
 ╚══════════════════════════════════════════════════════════════╝
 
-╔══════════════════════════════════════════════════════════════╗
-║                   PERFORMANCE METRICS                         ║
-╠══════════════════════════════════════════════════════════════╣
-║ Processing Time:            0.15 seconds                      ║
-║ Throughput:              513,333 packets/sec                  ║
-║ Bandwidth:                 37.23 MB/sec                       ║
-╚══════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════╗
-║                   APPLICATION BREAKDOWN                       ║
-╠══════════════════════════════════════════════════════════════╣
-║ HTTPS                 4  50.0% ##########                     ║
-║ YouTube               2  25.0% #####                          ║
-║ Facebook              1  12.5% ##                             ║
-║ DNS                   1  12.5% ##                             ║
-╚══════════════════════════════════════════════════════════════╝
-
-[Detected Domains/SNIs]
-  - www.youtube.com -> YouTube
-  - www.facebook.com -> Facebook
-  - www.google.com -> Google
-  - github.com -> GitHub
+[Detected Domains / SNIs]
+  www.youtube.com   →  YouTube
+  www.facebook.com  →  Facebook
+  www.google.com    →  Google
+  github.com        →  GitHub
 ```
 
 ---
 
 ## Contributing
 
-Contributions welcome! Areas for improvement:
+Open to contributions — especially in these areas:
 
-1. **Add IPv6 Support** (currently IPv4 only)
-2. **Implement QUIC/HTTP3 SNI Extraction**
-3. **Add More Protocol Classifiers** (SSH, FTP, etc.)
-4. **Improve Test Coverage** (target 90%+)
-5. **Add Prometheus Metrics Export**
-6. **Implement Live Capture** (not just PCAP files)
+1. **IPv6 support** (current implementation is IPv4-only)
+2. **QUIC / HTTP3 SNI extraction**
+3. **Additional protocol classifiers** — SSH, FTP, SMTP
+4. **Test coverage improvements** (target: 90%+)
+5. **Prometheus metrics endpoint**
+6. **Live capture mode** — bypass PCAP files entirely with `libpcap` bindings
 
 ---
 
 ## License
 
-MIT License - see LICENSE file
+MIT — see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## Credits
+## Acknowledgements
 
-- **Pcap4J**: Packet capture library (https://github.com/kaitoy/pcap4j)
-- **C++ Reference**: Original implementation in parent directory
-
----
-
-## Resume-Ready Talking Points
-
-When discussing this project in interviews:
-
-1. **Concurrency**: "I used `ExecutorService` with `BlockingQueue`s to implement a producer-consumer pipeline pattern with consistent hashing for flow affinity."
-
-2. **Performance**: "Achieved 200K+ pps by using per-thread flow tables (no locking), `AtomicLong` for statistics, and ByteBuffer for zero-copy I/O."
-
-3. **Design Patterns**: "Implemented the pipeline pattern with backpressure (bounded queues), graceful shutdown (sentinel packets), and dependency injection."
-
-4. **Java Expertise**: "Leveraged Java 17 features: records for immutability, switch expressions, Optional for null safety, and G1GC for low-latency."
-
-5. **Testing**: "Wrote unit tests with JUnit 5, integration tests with real PCAP data, and used JFR for performance profiling."
-
-6. **Real-World Impact**: "Deep Packet Inspection is used by ISPs, enterprises, and security systems to analyze billions of packets per day."
+- [Pcap4J](https://github.com/kaitoy/pcap4j) — packet capture and parsing library for Java
 
 ---
 
-**Built with ❤️ in Java**
+*Built with Java 17*
