@@ -1,4 +1,4 @@
-# DPI Engine — Java-Based Network Traffic Analyzer
+# Packet Insight — Java-Based Network Traffic Analyzer
 
 [![Java](https://img.shields.io/badge/Java-17+-orange.svg)](https://www.oracle.com/java/)
 [![Maven](https://img.shields.io/badge/Maven-3.6+-blue.svg)](https://maven.apache.org/)
